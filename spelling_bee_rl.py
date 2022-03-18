@@ -6,6 +6,7 @@ Original file is located at
     https://colab.research.google.com/drive/1JR4kuwTTiDfV74zlrYxx5Ik_HDjl-aw7
 """
 import pathlib
+from multiprocessing import Pool
 from time import perf_counter
 from copy import deepcopy
 from time import time
@@ -65,6 +66,8 @@ CORRECT_REWARD = 100
 INCORRECT_REWARD = -1
 MAX_GUESS_LEN = 10
 chars = [chr(i) for i in range(97, 97 + 26)]
+vowels = ['a', 'e,', 'i', 'o', 'u']
+consonants = [c for c in chars if c not in vowels]
 dictionary = load_dictionary()
 dict_dict = {}
 dict_dict_i = dict_dict
@@ -145,6 +148,8 @@ class SpellingBeeEnv:
         self.puzzle = None
         self.state = None
         self.n_actions = None
+        self.len_possible_words = None
+        self.len_words_found = 0
 
         self.patches = []
         self.viz = viz
@@ -160,6 +165,7 @@ class SpellingBeeEnv:
         self.state = []
         self.words_found = []
         self.n_actions = 0
+        self.len_words_found = 0
 
         while True:
             self.puzzle = sample_puzzle(self.rng)
@@ -168,6 +174,8 @@ class SpellingBeeEnv:
                 if can_make(self.puzzle, w):
                     self.possible_words.add(w)
             if 10 < len(self.possible_words):
+                self.len_possible_words = len(self.possible_words)
+                print(f"Longest possible word has {max([len(w) for w in self.possible_words])}")
                 break
 
         if self.fig is None or self.ax is None:
@@ -182,10 +190,11 @@ class SpellingBeeEnv:
     def step(self, action):
         # takes in the action (an integer from 0-7, 7 meaning check dictionary)
         # returns the next state, reward, and whether the episode is over
-        word = self.get_guess()
+        word = "".join(self.state)
         if action == 7:
             if self.puzzle[0] in word and word in dictionary:
                 self.words_found.append(word)
+                self.len_words_found = len(self.words_found)
                 reward = CORRECT_REWARD
             else:
                 reward = INCORRECT_REWARD
@@ -201,13 +210,13 @@ class SpellingBeeEnv:
 
         self.n_actions += 1
 
-        solved = len(set(self.words_found)) == len(self.possible_words)
+        solved = self.len_words_found == self.len_possible_words
         if solved:
             print("Solved!!!!")
         done = solved or self.n_actions > SpellingBeeEnv.MAX_GUESSES_PER_PUZZLE
 
         if self.viz:
-            self.guess_text.set_text(self.get_guess())
+            self.guess_text.set_text(word)
             self.words_found_text.set_text(self.words_found)
             plt.pause(0.01)
 
@@ -215,9 +224,6 @@ class SpellingBeeEnv:
 
     def random_action(self):
         return self.action_rng.randint(0, 8)
-
-    def get_guess(self):
-        return "".join(self.state)
 
 
 class AbstractAgent:
@@ -388,8 +394,34 @@ def generate_all_guesses(max_len):
             for c in product(range(7), repeat=l - 1):
                 c = list(c)
                 guess = c[:i] + [0] + c[i:] + [7]
-                yield guess
-                # yield from guess
+                if i == l - 1 or 0 != c[i]:
+                    yield guess
+
+
+def heuristic_score1(args):
+    puzzle, guess = args
+    word = [puzzle[i] for i in guess[:-1]]
+    _, counts = np.unique(word, return_counts=True)
+    high_duplication_cost = np.square(counts).sum()
+    letter_freq_score = sum([LETTER_FREQUENCIES[c] for c in word])
+    no_consonants_cost = np.all([(c in consonants) for c in word]).astype(int) * 10
+    no_vowels_cost = np.all([(c in vowels) for c in word]).astype(int) * 10
+
+    score = np.exp(-len(word))
+    score -= high_duplication_cost
+    score += letter_freq_score
+    score -= no_vowels_cost
+    score -= no_consonants_cost
+
+    return score
+
+
+def add_to_dict_tree(word_dict, word):
+    known_words_dict = word_dict
+    for c in word:
+        if c not in known_words_dict:
+            known_words_dict[c] = {}
+        known_words_dict = known_words_dict[c]
 
 
 class ExhaustiveAgent(AbstractAgent):
@@ -397,9 +429,9 @@ class ExhaustiveAgent(AbstractAgent):
         super().__init__(env)
         self.guessed_words = None
         self.known_words = {}
-        self.known_not_words = []
+        self.known_not_words = {}
 
-        self.possible_guesses = list(generate_all_guesses(8))
+        self.possible_guesses = np.array(list(generate_all_guesses(6)), dtype=object)
         self.len_possible_guesses = len(self.possible_guesses)
         self.current_word_guess_idx = 0
         self.current_letter_guess_idx = 0
@@ -419,6 +451,13 @@ class ExhaustiveAgent(AbstractAgent):
         self.current_word_guess_idx = 0
         self.current_letter_guess_idx = 0
 
+        with Pool() as p:
+            args = [(self.env.puzzle, g) for g in self.possible_guesses]
+            possible_guesses_scores = list(p.imap_unordered(heuristic_score1, args, chunksize=10000))
+
+        sorted_indices = np.argsort(possible_guesses_scores)
+        self.sorted_possible_guesses = self.possible_guesses[sorted_indices]
+
     def policy(self, state):
         # word_so_far = ''.join(state)
         # self.guessed_words[state[0]]
@@ -432,9 +471,12 @@ class ExhaustiveAgent(AbstractAgent):
         #                 return self.env.puzzle.index(next_letter)
 
         while True:
+            if self.current_word_guess_idx % 1000 == 0 and self.current_letter_guess_idx == 0:
+                print(self.current_word_guess_idx, self.len_possible_guesses)
             if self.current_word_guess_idx < self.len_possible_guesses:
-                current_word_guess = self.possible_guesses[self.current_word_guess_idx]
-                if current_word_guess in self.known_not_words:
+                current_word_guess = self.sorted_possible_guesses[self.current_word_guess_idx]
+                # first check if it's a known not-word
+                if self.is_word_known(current_word_guess):
                     self.current_word_guess_idx += 1
                     self.current_letter_guess_idx = 0
                 else:
@@ -449,6 +491,14 @@ class ExhaustiveAgent(AbstractAgent):
             else:
                 return 8
 
+    def is_word_known(self, word):
+        known_not_words_dict = self.known_not_words
+        for c in word:
+            if c not in known_not_words_dict:
+                return False
+            known_not_words_dict = known_not_words_dict[c]
+        return True
+
     def guess_word(self, state):
         self.guessed_words.append(''.join(state))
         return 7
@@ -457,15 +507,10 @@ class ExhaustiveAgent(AbstractAgent):
         word = ''.join(state)
         if reward == CORRECT_REWARD:
             if word not in self.known_words:
-                known_words_dict = self.known_words
-                for c in word:
-                    if c not in known_words_dict:
-                        known_words_dict[c] = {}
-                    known_words_dict = known_words_dict[c]
+                add_to_dict_tree(self.known_words, word)
             self.guessed_words.append(word)
         elif reward == INCORRECT_REWARD:
-            if word not in self.known_not_words:
-                self.known_not_words.append(word)
+            add_to_dict_tree(self.known_not_words, word)
             self.guessed_words.append(word)
 
 
@@ -490,6 +535,7 @@ def main():
             if done:
                 break
         print(perf_counter() - t0)
+        pass
 
     out = pathlib.Path(f"agent_{int(time())}")
     print(f"Saved to {out.as_posix()}")
