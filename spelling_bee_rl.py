@@ -8,7 +8,7 @@ Original file is located at
 import pathlib
 from time import time
 import pickle
-from itertools import permutations
+from itertools import permutations, product
 import random
 from dataclasses import dataclass
 from typing import List
@@ -259,7 +259,7 @@ class RandomAgent(AbstractAgent):
 
 
 def can_make(puzzle, word):
-    return set(word).issubset(set(puzzle))
+    return set(word).issubset(set(puzzle)) and (puzzle[0] in word)
 
 
 def p_enter(l):
@@ -370,7 +370,7 @@ class HeuristicAgent1(AbstractAgent):
         return 7
 
 
-def exhaustive_guess(max_len=4):
+def generate_all_guesses(max_len):
     """
     recursively yields...
     0 0 0 0 7 (7 means enter)
@@ -390,12 +390,12 @@ def exhaustive_guess(max_len=4):
     6 6 6 6 6 6 ... 6 7
     """
     for l in range(4, max_len + 1):
-        p = np.repeat(np.arange(0, 7), max_len)
-        for c in permutations(p, l - 1):
-            c = list(c)
-            for i in range(l):
+        for i in range(l):
+            for c in product(range(7), repeat=l - 1):
+                c = list(c)
                 guess = c[:i] + [0] + c[i:] + [7]
-                yield from guess
+                yield guess
+                # yield from guess
 
 
 class ExhaustiveAgent(AbstractAgent):
@@ -403,13 +403,17 @@ class ExhaustiveAgent(AbstractAgent):
         super().__init__(env)
         self.guessed_words = None
         self.known_words = []
+        self.known_not_words = []
 
-        self.exhaustive_guess_gen = list(exhaustive_guess())
-        self.exhaustive_guess_idx = 0
+        self.possible_guesses = list(generate_all_guesses(8))
+        self.current_word_guess_idx = 0
+        self.current_letter_guess_idx = 0
+        # TODO: incorporate known not words so we don't repeat words that don't exist
 
     def reset(self):
         self.guessed_words = []
-        self.exhaustive_guess_idx = 0
+        self.current_word_guess_idx = 0
+        self.current_letter_guess_idx = 0
 
     def policy(self, state):
         word_so_far = ''.join(state)
@@ -422,9 +426,23 @@ class ExhaustiveAgent(AbstractAgent):
                         next_letter = w[len(word_so_far)]
                         return self.env.puzzle.index(next_letter)
 
-        if self.exhaustive_guess_idx < len(self.exhaustive_guess_gen) - 1:
-            self.exhaustive_guess_idx += 1
-        return self.exhaustive_guess_gen[self.exhaustive_guess_idx]
+        while True:
+            if self.current_word_guess_idx < len(self.possible_guesses):
+                current_word_guess = self.possible_guesses[self.current_word_guess_idx]
+                if current_word_guess in self.known_not_words:
+                    self.current_word_guess_idx += 1
+                    self.current_letter_guess_idx = 0
+                else:
+                    current_letter_guess = current_word_guess[self.current_letter_guess_idx]
+                    self.current_letter_guess_idx += 1
+                    if self.current_letter_guess_idx > len(current_word_guess) - 1:
+                        self.current_word_guess_idx += 1
+                        self.current_letter_guess_idx = 0
+                    if current_letter_guess == 7:
+                        self.guessed_words.append(''.join(state))
+                    return current_letter_guess
+            else:
+                return 8
 
     def guess_word(self, state):
         self.guessed_words.append(''.join(state))
@@ -437,6 +455,8 @@ class ExhaustiveAgent(AbstractAgent):
                 self.known_words.append(word)
             self.guessed_words.append(word)
         elif reward == INCORRECT_REWARD:
+            if word not in self.known_not_words:
+                self.known_not_words.append(word)
             self.guessed_words.append(word)
 
 
@@ -449,10 +469,11 @@ def main():
         env.reset()
         agent.reset()
         state = env.state
-        print(env.possible_words)
 
         while True:
             action = agent.policy(state)
+            if action == 8:
+                break
             next_state, reward, done = env.step(action)
             agent.post_step(state, next_state, action, reward)
             state = next_state
@@ -474,6 +495,8 @@ def main():
     state = env.state
     while True:
         action = agent.policy(state)
+        if action == 8:
+            break
         next_state, reward, done = env.step(action)
         agent.post_step(state, next_state, action, reward)
         state = next_state
