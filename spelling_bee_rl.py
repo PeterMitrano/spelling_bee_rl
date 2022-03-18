@@ -6,6 +6,8 @@ Original file is located at
     https://colab.research.google.com/drive/1JR4kuwTTiDfV74zlrYxx5Ik_HDjl-aw7
 """
 import pathlib
+from time import perf_counter
+from copy import deepcopy
 from time import time
 import pickle
 from itertools import permutations, product
@@ -64,6 +66,13 @@ INCORRECT_REWARD = -1
 MAX_GUESS_LEN = 10
 chars = [chr(i) for i in range(97, 97 + 26)]
 dictionary = load_dictionary()
+dict_dict = {}
+dict_dict_i = dict_dict
+for w in dictionary:
+    for c in w:
+        if c not in dict_dict_i:
+            dict_dict_i[c] = {}
+        dict_dict_i = dict_dict_i[c]
 
 outer_color = "#ccc"
 inner_color = "y"
@@ -125,15 +134,12 @@ def init_ui(ax, puzzle):
 
 
 class SpellingBeeEnv:
-    MAX_GUESSES_PER_PUZZLE = 1000000
+    MAX_GUESSES_PER_PUZZLE = 10_000_000
 
     def __init__(self, viz: bool):
         random.seed(1)
         self.rng = np.random.RandomState(3)
         self.action_rng = np.random.RandomState(1)
-        self.rewards = []
-        self.guesses = []
-        self.words_founds = []
         self.words_found = []
         self.possible_words = None
         self.puzzle = None
@@ -148,11 +154,6 @@ class SpellingBeeEnv:
         else:
             self.fig = None
             self.ax = None
-
-    def clear_log(self):
-        self.rewards = []
-        self.guesses = []
-        self.words_founds = []
 
     def reset(self):
         # sample a new spelling bee puzzle
@@ -183,7 +184,7 @@ class SpellingBeeEnv:
         # returns the next state, reward, and whether the episode is over
         word = self.get_guess()
         if action == 7:
-            if word in dictionary and self.puzzle[0] in word:
+            if self.puzzle[0] in word and word in dictionary:
                 self.words_found.append(word)
                 reward = CORRECT_REWARD
             else:
@@ -199,10 +200,6 @@ class SpellingBeeEnv:
             self.state = self.state + [next_character]
 
         self.n_actions += 1
-
-        self.rewards.append(reward)
-        self.guesses.append(self.get_guess())
-        self.words_founds.append(self.words_found)
 
         solved = len(set(self.words_found)) == len(self.possible_words)
         if solved:
@@ -221,9 +218,6 @@ class SpellingBeeEnv:
 
     def get_guess(self):
         return "".join(self.state)
-
-    def get_log(self):
-        return GameLog(self.puzzle, self.rewards, self.guesses, self.words_founds)
 
 
 class AbstractAgent:
@@ -402,32 +396,43 @@ class ExhaustiveAgent(AbstractAgent):
     def __init__(self, env):
         super().__init__(env)
         self.guessed_words = None
-        self.known_words = []
+        self.known_words = {}
         self.known_not_words = []
 
         self.possible_guesses = list(generate_all_guesses(8))
+        self.len_possible_guesses = len(self.possible_guesses)
         self.current_word_guess_idx = 0
         self.current_letter_guess_idx = 0
+        self.has_guessed_all_known_words = False
+        self.possible_known_words = None
         # TODO: incorporate known not words so we don't repeat words that don't exist
 
     def reset(self):
         self.guessed_words = []
+
+        self.has_guessed_all_known_words = False
+        self.possible_known_words = []
+        # FIXME: this is wrong
+        for w in self.known_words:
+            if can_make(self.env.puzzle, w):
+                self.possible_known_words.append(w)
         self.current_word_guess_idx = 0
         self.current_letter_guess_idx = 0
 
     def policy(self, state):
-        word_so_far = ''.join(state)
-        for w in self.known_words:
-            if w not in self.guessed_words:
-                if can_make(self.env.puzzle, w):
-                    if word_so_far == w:
-                        return self.guess_word(state)
-                    else:
-                        next_letter = w[len(word_so_far)]
-                        return self.env.puzzle.index(next_letter)
+        # word_so_far = ''.join(state)
+        # self.guessed_words[state[0]]
+        # for w in self.known_words:
+        #     if w not in self.guessed_words:
+        #         if can_make(self.env.puzzle, w):
+        #             if word_so_far == w:
+        #                 return self.guess_word(state)
+        #             else:
+        #                 next_letter = w[len(word_so_far)]
+        #                 return self.env.puzzle.index(next_letter)
 
         while True:
-            if self.current_word_guess_idx < len(self.possible_guesses):
+            if self.current_word_guess_idx < self.len_possible_guesses:
                 current_word_guess = self.possible_guesses[self.current_word_guess_idx]
                 if current_word_guess in self.known_not_words:
                     self.current_word_guess_idx += 1
@@ -452,7 +457,11 @@ class ExhaustiveAgent(AbstractAgent):
         word = ''.join(state)
         if reward == CORRECT_REWARD:
             if word not in self.known_words:
-                self.known_words.append(word)
+                known_words_dict = self.known_words
+                for c in word:
+                    if c not in known_words_dict:
+                        known_words_dict[c] = {}
+                    known_words_dict = known_words_dict[c]
             self.guessed_words.append(word)
         elif reward == INCORRECT_REWARD:
             if word not in self.known_not_words:
@@ -470,6 +479,7 @@ def main():
         agent.reset()
         state = env.state
 
+        t0 = perf_counter()
         while True:
             action = agent.policy(state)
             if action == 8:
@@ -479,6 +489,7 @@ def main():
             state = next_state
             if done:
                 break
+        print(perf_counter() - t0)
 
     out = pathlib.Path(f"agent_{int(time())}")
     print(f"Saved to {out.as_posix()}")
@@ -488,7 +499,6 @@ def main():
     agent.env = env
     env = agent.env
     # EVALUATION
-    env.clear_log()
     env.viz = True
     env.reset()
     agent.reset()
@@ -502,9 +512,6 @@ def main():
         state = next_state
         if done:
             break
-
-    plt.figure()
-    plt.plot(env.rewards)
 
     print(agent.known_words)
 
