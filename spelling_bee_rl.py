@@ -6,20 +6,17 @@ Original file is located at
     https://colab.research.google.com/drive/1JR4kuwTTiDfV74zlrYxx5Ik_HDjl-aw7
 """
 import pathlib
-from multiprocessing import Pool
-from time import perf_counter
-from copy import deepcopy
-from time import time
 import pickle
-from itertools import permutations, product
 import random
 from dataclasses import dataclass
+from itertools import product
+from multiprocessing import Pool
+from time import perf_counter
+from time import time
 from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
-import requests
-from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Polygon
 from tqdm import trange
 
@@ -31,6 +28,14 @@ def load_dictionary():
     with open("valid_words.txt", "r") as f:
         valid_words = [l.strip("\n") for l in f.readlines()]
     return valid_words
+
+
+def add_to_dict_tree(word_dict, word):
+    known_words_dict = word_dict
+    for c in word:
+        if c not in known_words_dict:
+            known_words_dict[c] = {}
+        known_words_dict = known_words_dict[c]
 
 
 LETTER_FREQUENCIES = {
@@ -68,14 +73,10 @@ MAX_GUESS_LEN = 10
 chars = [chr(i) for i in range(97, 97 + 26)]
 vowels = ['a', 'e,', 'i', 'o', 'u']
 consonants = [c for c in chars if c not in vowels]
-dictionary = load_dictionary()
-dict_dict = {}
-dict_dict_i = dict_dict
-for w in dictionary:
-    for c in w:
-        if c not in dict_dict_i:
-            dict_dict_i[c] = {}
-        dict_dict_i = dict_dict_i[c]
+dictionary_list = load_dictionary()
+dictionary_tree = {}
+for w in dictionary_list:
+    add_to_dict_tree(dictionary_tree, w)
 
 outer_color = "#ccc"
 inner_color = "y"
@@ -85,14 +86,6 @@ def sample_puzzle(rng):
     p = list(LETTER_FREQUENCIES.values())
     p = p / np.sum(p)
     return rng.choice(list(LETTER_FREQUENCIES.keys()), p=p, size=7, replace=False).tolist()
-
-
-@dataclass
-class GameLog:
-    puzzle: str
-    rewards: List[float]
-    guesses: List[str]
-    words_found: List[List[str]]
 
 
 def create_game_ui():
@@ -136,8 +129,17 @@ def init_ui(ax, puzzle):
     return guess_text, words_found_text, patches
 
 
+def word_in_dict(word, root_dict):
+    dict_tmp = root_dict
+    for c in word:
+        if c not in dict_tmp:
+            return False
+        dict_tmp = dict_tmp[c]
+    return True
+
+
 class SpellingBeeEnv:
-    MAX_GUESSES_PER_PUZZLE = 10_000_000
+    MAX_GUESSES_PER_PUZZLE = 900_000_000
 
     def __init__(self, viz: bool):
         random.seed(1)
@@ -170,7 +172,7 @@ class SpellingBeeEnv:
         while True:
             self.puzzle = sample_puzzle(self.rng)
             self.possible_words = set()
-            for w in dictionary:
+            for w in dictionary_list:
                 if can_make(self.puzzle, w):
                     self.possible_words.add(w)
             if 10 < len(self.possible_words):
@@ -192,7 +194,7 @@ class SpellingBeeEnv:
         # returns the next state, reward, and whether the episode is over
         word = "".join(self.state)
         if action == 7:
-            if self.puzzle[0] in word and word in dictionary:
+            if self.puzzle[0] in word and word_in_dict(word, dictionary_tree):
                 self.words_found.append(word)
                 self.len_words_found = len(self.words_found)
                 reward = CORRECT_REWARD
@@ -401,27 +403,19 @@ def generate_all_guesses(max_len):
 def heuristic_score1(args):
     puzzle, guess = args
     word = [puzzle[i] for i in guess[:-1]]
-    _, counts = np.unique(word, return_counts=True)
-    high_duplication_cost = np.square(counts).sum()
-    letter_freq_score = sum([LETTER_FREQUENCIES[c] for c in word])
-    no_consonants_cost = np.all([(c in consonants) for c in word]).astype(int) * 10
-    no_vowels_cost = np.all([(c in vowels) for c in word]).astype(int) * 10
+    # _, counts = np.unique(word, return_counts=True)
+    # high_duplication_cost = np.square(counts).sum()
+    # letter_freq_score = sum([LETTER_FREQUENCIES[c] for c in word])
+    # no_consonants_cost = np.all([(c in consonants) for c in word]).astype(int) * 10
+    # no_vowels_cost = np.all([(c in vowels) for c in word]).astype(int) * 10
 
     score = np.exp(-len(word))
-    score -= high_duplication_cost
-    score += letter_freq_score
-    score -= no_vowels_cost
-    score -= no_consonants_cost
+    # score -= high_duplication_cost
+    # score += letter_freq_score
+    # score -= no_vowels_cost
+    # score -= no_consonants_cost
 
     return score
-
-
-def add_to_dict_tree(word_dict, word):
-    known_words_dict = word_dict
-    for c in word:
-        if c not in known_words_dict:
-            known_words_dict[c] = {}
-        known_words_dict = known_words_dict[c]
 
 
 class ExhaustiveAgent(AbstractAgent):
@@ -431,7 +425,7 @@ class ExhaustiveAgent(AbstractAgent):
         self.known_words = {}
         self.known_not_words = {}
 
-        self.possible_guesses = np.array(list(generate_all_guesses(6)), dtype=object)
+        self.possible_guesses = np.array(list(generate_all_guesses(8)), dtype=object)
         self.len_possible_guesses = len(self.possible_guesses)
         self.current_word_guess_idx = 0
         self.current_letter_guess_idx = 0
@@ -451,9 +445,11 @@ class ExhaustiveAgent(AbstractAgent):
         self.current_word_guess_idx = 0
         self.current_letter_guess_idx = 0
 
+        print("Ranking guesses...")
         with Pool() as p:
             args = [(self.env.puzzle, g) for g in self.possible_guesses]
             possible_guesses_scores = list(p.imap_unordered(heuristic_score1, args, chunksize=10000))
+        print("done!")
 
         sorted_indices = np.argsort(possible_guesses_scores)
         self.sorted_possible_guesses = self.possible_guesses[sorted_indices]
@@ -471,8 +467,8 @@ class ExhaustiveAgent(AbstractAgent):
         #                 return self.env.puzzle.index(next_letter)
 
         while True:
-            if self.current_word_guess_idx % 1000 == 0 and self.current_letter_guess_idx == 0:
-                print(self.current_word_guess_idx, self.len_possible_guesses)
+            if self.current_word_guess_idx % 50000 == 0 and self.current_letter_guess_idx == 0:
+                print(f"{100 * self.current_word_guess_idx / self.len_possible_guesses:.1f}%")
             if self.current_word_guess_idx < self.len_possible_guesses:
                 current_word_guess = self.sorted_possible_guesses[self.current_word_guess_idx]
                 # first check if it's a known not-word
@@ -492,12 +488,7 @@ class ExhaustiveAgent(AbstractAgent):
                 return 8
 
     def is_word_known(self, word):
-        known_not_words_dict = self.known_not_words
-        for c in word:
-            if c not in known_not_words_dict:
-                return False
-            known_not_words_dict = known_not_words_dict[c]
-        return True
+        return word_in_dict(word, self.known_not_words)
 
     def guess_word(self, state):
         self.guessed_words.append(''.join(state))
